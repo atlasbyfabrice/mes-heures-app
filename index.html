@@ -2,6 +2,17 @@
 <style>
 *{box-sizing:border-box}body{margin:0;background:#f1f3f7;color:#192c41;font:16px -apple-system,BlinkMacSystemFont,system-ui,sans-serif}main{max-width:620px;margin:auto;padding:14px}.card{background:#fff;border-radius:22px;padding:20px;margin-bottom:14px}h2{font-size:19px;margin:0 0 15px}.top,.line{display:flex;align-items:center;justify-content:space-between;gap:12px}.big{font-size:46px;font-weight:750;margin:12px 0 0}.muted{color:#697582;font-size:14px}.buttons{display:grid;grid-template-columns:1fr 1fr;gap:10px}.buttons button{min-height:72px;font-size:16px}button{border:0;border-radius:14px;padding:12px;background:#e2eaf2;color:#1768bc;cursor:pointer}button:disabled{opacity:.4}.green{background:#18766b;color:white}.red{background:#b7504c;color:white}.line{margin:12px 0;align-items:center}.line strong{text-align:right}.line input{width:140px;max-width:52%;padding:10px;border:1px solid #d5dce4;border-radius:10px;background:#f6f7f9;font-size:16px}input[type=date]{width:155px}textarea{width:100%;height:70px;border:1px solid #d5dce4;border-radius:10px;padding:10px;font:inherit}.week{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:15px}.day{padding:10px 1px;font-size:14px;background:#edf1f5;color:#243c50}.day.active{background:#17786e;color:white}.day.has{outline:2px solid #8dbbb2}.summary{display:grid;grid-template-columns:1fr 1fr;gap:10px}.summary>div{background:#f0f3f6;border-radius:12px;padding:12px}.summary b{display:block;font-size:22px;margin-top:5px}.notice{font-size:13px;color:#657282;line-height:1.45}.save{background:#17786e;color:white;width:100%;margin:8px 0;font-weight:650}.status{color:#17786e;font-size:14px;min-height:20px}.compact{font-size:14px}.nav{display:flex;align-items:center;justify-content:space-between;gap:8px}.nav button{padding:10px}.audit{font-size:12px;color:#677;white-space:pre-wrap}input{color:#192c41!important;-webkit-text-fill-color:#192c41!important;color-scheme:light}input[type=time],input[type=date],input[type=month]{background:#f6f7f9!important} .week .day{min-width:0;overflow:hidden;font-size:12px;padding:10px 0} .week .day small{display:block;font-size:10px} .summary{margin:12px 0} .summary b{font-size:20px}</style></head>
 <body><main>
+<section class="card" id="accountCard"><h2>Mon compte et synchronisation</h2>
+<p id="accountLabel" class="compact">Mode local · sans connexion</p>
+<button id="loginButton" onclick="googleLogin()" disabled>Se connecter avec Google</button>
+<button id="logoutButton" onclick="googleLogout()" hidden>Se déconnecter</button>
+<p id="syncStatus" class="notice" role="status" aria-live="polite">Chargement de la connexion Google… Les données locales restent accessibles.</p>
+<button id="retrySync" onclick="retryCloud()" hidden>Réessayer la synchronisation</button>
+<button id="refreshCloud" onclick="acceptCloud()" hidden>Charger la version en ligne</button>
+<button id="migrateLocal" onclick="importLocalData()" hidden>Ajouter les données locales à mon compte</button>
+<details><summary class="compact">Récupérer les copies de sécurité locales</summary><p class="notice">En cas de problème, ce fichier conserve les données brutes et les brouillons archivés sur cet appareil. Il peut contenir des informations personnelles ; garde-le en lieu sûr.</p><button onclick="exportRescue()">Exporter les copies de sécurité</button></details>
+<p class="notice">Connecte-toi au même compte Google sur chaque appareil. « Synchronisé » confirme l’enregistrement en ligne. Les données antérieures de ce navigateur restent en mode local jusqu’à leur import volontaire. Les sauvegardes JSON restent disponibles.</p>
+</section>
 <section class="card"><div class="top"><span id="today" class="muted"></span><span id="status" class="muted">Prêt</span></div><div id="clock" class="big">0 h 00</div><div class="muted">Aujourd'hui · temps enregistré hors repas</div></section>
 <section class="card"><h2>Pointage rapide</h2><div class="buttons"><button class="green" onclick="point('start')">▶ Début journée</button><button onclick="point('mealStart')">🍽 Début repas</button><button onclick="point('mealEnd')">✓ Fin repas</button><button class="red" onclick="point('end')">■ Fin journée</button></div><p class="status" id="msg"></p></section>
 <section class="card"><div class="nav"><button onclick="shift(-7)">‹ Semaine</button><strong id="weekLabel"></strong><button onclick="shift(7)">Semaine ›</button></div><div class="week" id="weekDays"></div><p class="notice">Choisir un jour charge ses horaires enregistrés. Le compteur du haut concerne uniquement aujourd’hui.</p></section>
@@ -25,6 +36,7 @@
 (function(){
 'use strict';
 var KEY='mes_heures_fiable_v2',db={},selected=localDate(); var storageReadable=true; var IMPORT_LOG_KEY='mes_heures_import_history_v3',importLog=[];
+var currentUser=null,authReady=false,cloudReady=false,cloudBusy=false,cloudConflict=false,cloudEpoch=0,cloudRevision=0,pendingCloud=false,latestCloud=null,cloudUnsubscribe=null,cloudTimer=null,sdk=null,auth=null,firestore=null,formDirty=false;
 var payroll={}, recoveries=[]; var SETTINGS='mes_heures_comparaison_v2';
 function el(id){return document.getElementById(id)}
 function localDate(dt){dt=dt||new Date();return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0')}
@@ -33,23 +45,27 @@ function fmt(n){n=Math.round(n);return (n<0?'−':'')+Math.floor(Math.abs(n)/60)
 function min(t){if(!t)return null;var x=t.split(':');return +x[0]*60+(+x[1])}
 function calc(d){if(!d||!d.start||!d.end)return null;var a=min(d.start),b=min(d.end);if(b<a)b+=1440;var pause=0;if(d.mealStart&&d.mealEnd){var x=min(d.mealStart),y=min(d.mealEnd);if(y<x)y+=1440;pause=y-x}return Math.max(0,b-a-pause)}
 try{importLog=JSON.parse(localStorage.getItem(IMPORT_LOG_KEY)||'[]');if(!Array.isArray(importLog))throw Error('Historique invalide')}catch(e){importLog=[];storageReadable=false}
- function storageBlocked(){if(storageReadable)return false;el('saved').textContent='Sauvegarde locale illisible ou inaccessible : modifications bloquées pour préserver les données. Conserve ce navigateur et récupère une sauvegarde avant de continuer.';return true}
- function persist(){if(storageBlocked())return false;try{localStorage.setItem(KEY,JSON.stringify(db));localStorage.setItem(SETTINGS,JSON.stringify({payroll:payroll,recoveries:recoveries}));return true}catch(e){el('saved').textContent='Stockage non disponible : exporte une sauvegarde.';return false}}
+ function storageBlocked(){if(currentUser&&(!cloudReady||cloudBusy||cloudConflict)){el('saved').textContent='Enregistrement suspendu : consulte le panneau de synchronisation en haut.';return true}if(storageReadable)return false;el('saved').textContent='Sauvegarde locale illisible ou inaccessible : modifications bloquées pour préserver les données. Conserve ce navigateur et récupère une sauvegarde avant de continuer.';return true}
+ function persist(){if(storageBlocked())return false;try{
+if(currentUser){pendingCloud=true;writeAccountCache();setSync('Enregistré sur cet appareil · synchronisation en attente.');scheduleSync()}
+else{localStorage.setItem(KEY,JSON.stringify(db));localStorage.setItem(SETTINGS,JSON.stringify({payroll:payroll,recoveries:recoveries}));localStorage.setItem(IMPORT_LOG_KEY,JSON.stringify(importLog))}
+return true}catch(e){el('saved').textContent='Enregistrement local impossible : exporte immédiatement une sauvegarde JSON.';setSync('Stockage local indisponible : exporte une sauvegarde JSON.');return false}}
 // Conserver les clés historiques et ne rien écrire au démarrage.
 try{var storedDays=localStorage.getItem(KEY);db=storedDays===null?{}:JSON.parse(storedDays);if(!db||typeof db!=='object'||Array.isArray(db))throw Error('Données invalides');Object.keys(db).forEach(function(k){if(!isDayKey(k))throw Error('Date invalide');cleanDay(db[k])})}catch(e){db={};storageReadable=false}
 try{var storedMeta=localStorage.getItem(SETTINGS),meta=storedMeta===null?{}:JSON.parse(storedMeta);if(!meta||typeof meta!=='object'||Array.isArray(meta))throw Error('Réglages invalides');payroll=meta.payroll||{};recoveries=meta.recoveries||[];if(typeof payroll!=='object'||Array.isArray(payroll)||!Array.isArray(recoveries)||recoveries.some(r=>!r||typeof r.date!=='string'||!isDayKey(r.date)))throw Error('Réglages invalides')}catch(e){payroll={};recoveries=[];storageReadable=false}
+try{var checked=validatePayload({days:db,payroll:payroll,recoveries:recoveries,importHistory:importLog});db=checked.days;payroll=checked.payroll;recoveries=checked.recoveries;importLog=checked.importHistory}catch(e){storageReadable=false;db={};payroll={};recoveries=[];importLog=[]}
 function monday(s){var d=asDate(s),w=(d.getDay()+6)%7;d.setDate(d.getDate()-w);return d}
 function add(d,n){var t=new Date(d);t.setDate(t.getDate()+n);return localDate(t)}
 function total(start){var t=0,co=0,missing=false;for(var i=0;i<7;i++){var d=db[add(asDate(start),i)],v=calc(d);if(v!==null){t+=v;co+=Math.max(0,v-60);if(!d.mealStart||!d.mealEnd)missing=true}}return {t:t,co:co,missing:missing}}
 function showDate(){var d=db[selected]||{};el('date').value=selected;el('chosen').textContent=asDate(selected).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'});['start','mealStart','mealEnd','end'].forEach(function(k){el(k).value=d[k]||''});el('note').value=d.note||'';var n=calc(d);el('net').textContent=n===null?'—':fmt(n)+(d.mealStart&&d.mealEnd?'':' · pause à compléter');el('ded').textContent=n===null?'—':'1 h 00';el('company').textContent=n===null?'—':fmt(Math.max(0,n-60));el('audit').textContent=(d.audit||[]).join('\n')||'Aucune correction';}
 function render(){showDate();var mon=monday(selected),start=localDate(mon);
-drawWeek();drawMonth();var t=total(start);el('weekly').textContent=fmt(t.t)+(t.missing?' *':'');el('weeklyCompany').textContent=fmt(t.co)+(t.missing?' *':'');el('difference').textContent=(t.t>=2100?'+':'−')+fmt(Math.abs(t.t-2100));tick()}
+drawWeek();drawMonth();var t=total(start);el('weekly').textContent=fmt(t.t)+(t.missing?' *':'');el('weeklyCompany').textContent=fmt(t.co)+(t.missing?' *':'');el('difference').textContent=(t.t>=2100?'+':'−')+fmt(Math.abs(t.t-2100));tick();restoreDraftFields()}
 function tick(){var now=new Date(),today=localDate(now),d=db[today]||{};el('today').textContent=now.toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});el('status').textContent=d.end?'Terminée':d.start?'En cours':'Prêt';var n=calc(d);if(n===null&&d.start&&!d.end){n=min(now.toTimeString().slice(0,5))-min(d.start);if(d.mealStart){var end=d.mealEnd||now.toTimeString().slice(0,5);n-=Math.max(0,min(end)-min(d.mealStart))}}el('clock').textContent=fmt(Math.max(0,n||0))}
-window.choose=function(s){if(!/^\d{4}-\d\d-\d\d$/.test(s))return;selected=s;el('saved').textContent='';render()};
-window.shift=function(n){selected=add(asDate(selected),n);render()};
+window.choose=function(s){if(!leaveForm())return;if(!/^\d{4}-\d\d-\d\d$/.test(s))return;selected=s;el('saved').textContent='';render()};
+window.shift=function(n){if(!leaveForm())return;selected=add(asDate(selected),n);render()};
 window.saveDay=function(){if(storageBlocked())return;var d=db[selected]||{audit:[]},newD={};['start','mealStart','mealEnd','end'].forEach(function(k){newD[k]=el(k).value});newD.note=el('note').value;if(newD.mealStart!==''&&newD.mealEnd!==''&&min(newD.mealEnd)<min(newD.mealStart)){el('saved').textContent='Vérifie les horaires du repas.';return}
-d.audit=d.audit||[];var changed=false;Object.keys(newD).forEach(function(k){if((d[k]||'')!==newD[k]){d.audit.push(new Date().toLocaleString('fr-FR')+' : '+k+' '+(d[k]||'vide')+' → '+(newD[k]||'vide'));d[k]=newD[k];changed=true}});db[selected]=d;var ok=persist();render();el('saved').textContent=ok?(changed?'✓ Enregistré et totaux recalculés':'Aucun changement à enregistrer'):'Stockage non disponible'};
-window.point=function(k){if(storageBlocked())return;var s=localDate(),d=db[s]||{audit:[]};if(d[k]&&!confirm('Remplacer le pointage existant ?'))return;var v=new Date().toTimeString().slice(0,5);d.audit=d.audit||[];d.audit.push(new Date().toLocaleString('fr-FR')+' : pointage '+k+' = '+v);d[k]=v;db[s]=d;selected=s;persist();render();el('msg').textContent='✓ '+v+' enregistré'};
+d.audit=d.audit||[];var changed=false;Object.keys(newD).forEach(function(k){if((d[k]||'')!==newD[k]){d.audit.push(new Date().toLocaleString('fr-FR')+' : '+k+' '+(d[k]||'vide')+' → '+(newD[k]||'vide'));d[k]=newD[k];changed=true}});db[selected]=d;clearDraftFields(['start','mealStart','mealEnd','end','note']);var ok=persist();render();el('saved').textContent=ok?(changed?'✓ Enregistré et totaux recalculés':'Aucun changement à enregistrer'):'Stockage non disponible'};
+window.point=function(k){if(storageBlocked()||!leaveForm())return;var s=localDate(),d=db[s]||{audit:[]};if(d[k]&&!confirm('Remplacer le pointage existant ?'))return;var v=new Date().toTimeString().slice(0,5);d.audit=d.audit||[];d.audit.push(new Date().toLocaleString('fr-FR')+' : pointage '+k+' = '+v);d[k]=v;db[s]=d;selected=s;var ok=persist();render();el('msg').textContent=ok?'✓ '+v+' enregistré sur cet appareil':'Pointage en mémoire seulement : exporte une sauvegarde JSON'};
 function downloadJSON(data,name){var blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),a=document.createElement('a'),u=URL.createObjectURL(blob);a.href=u;a.download=name;a.click();setTimeout(function(){URL.revokeObjectURL(u)},3000)}
 function exportPayload(days){return {format:'mes-heures-adelya',version:3,days:days,payroll:payroll,recoveries:recoveries,importHistory:importLog,exported:new Date().toISOString()}}
 window.backup=function(){downloadJSON(exportPayload(db),'Mes_heures_sauvegarde_complete_'+localDate()+'.json')};
@@ -58,26 +74,161 @@ function drawImportLog(){var target=el('importHistory');if(target)target.textCon
 function minutesText(v){var m=/^(\d{1,4}):(\d{2})$/.exec((v||'').trim());return m&&+m[2]<60?+m[1]*60+(+m[2]):null}
 function monthInfo(m){var keys=Object.keys(db).filter(k=>k.slice(0,7)===m).sort(),t=0,co=0,missing=0,count=0;keys.forEach(k=>{var d=db[k],n=calc(d);if(n!==null){t+=n;co+=Math.max(0,n-60);count++;if(!d.mealStart||!d.mealEnd)missing++}});return {keys,t,co,missing,count}}
 function drawWeek(){var mon=monday(selected),start=localDate(mon);el('weekLabel').textContent=asDate(start).toLocaleDateString('fr-FR',{day:'numeric',month:'short',year:'numeric'});el('weekDays').innerHTML='';for(var i=0;i<7;i++){var date=add(mon,i),btn=document.createElement('button');btn.className='day'+(date===selected?' active':'')+(db[date]?' has':'');btn.textContent=['L','M','M','J','V','S','D'][i]+' '+date.slice(-2);btn.onclick=(function(k){return function(){choose(k)}})(date);el('weekDays').appendChild(btn)}}
-function drawMonth(){var m=el('month').value||selected.slice(0,7);el('month').value=m;var info=monthInfo(m),pay=payroll[m]||{};el('monthlyNet').textContent=fmt(info.t);el('monthlyCo').textContent=fmt(info.co);el('monthlyDays').textContent=info.count;el('monthlyMissing').textContent=info.missing;el('paid').value=pay.paid||'';el('paynote').value=pay.note||'';var p=minutesText(pay.paid);el('payGap').textContent=p===null?'—':fmt(info.t-p)+(info.missing?' (provisoire)':'');var list=el('recList');list.innerHTML='';recoveries.filter(r=>r.date.slice(0,7)===m).forEach(r=>{var row=document.createElement('p');row.textContent=r.date+' · '+r.duration+' · '+r.note+' ';var b=document.createElement('button');b.textContent='Supprimer';b.onclick=function(){if(storageBlocked())return;if(confirm('Supprimer cette récupération du suivi ?')){recoveries=recoveries.filter(x=>x.id!==r.id);persist();drawMonth()}};row.appendChild(b);list.appendChild(row)});if(!list.children.length)list.textContent='Aucune récupération déclarée pour ce mois.'}
-window.savePayroll=function(){if(storageBlocked())return;var m=el('month').value,v=el('paid').value.trim();if(v&&minutesText(v)===null){alert('Utilise le format HH:MM, par exemple 151:40.');return}payroll[m]={paid:v,note:el('paynote').value};persist();drawMonth();alert('Comparaison mensuelle enregistrée.')};
-window.addRecovery=function(){if(storageBlocked())return;var date=el('recDate').value,duration=el('recTime').value.trim(),note=el('recNote').value;if(!date||minutesText(duration)===null){alert('Indique une date et une durée HH:MM.');return}recoveries.push({id:Date.now()+'-'+recoveries.length,date,duration,note});persist();el('month').value=date.slice(0,7);drawMonth();el('recTime').value='';el('recNote').value=''};
+function drawMonth(){drawMonthData();restoreDraftFields()}
+function drawMonthData(){var m=el('month').value||selected.slice(0,7);el('month').value=m;var info=monthInfo(m),pay=payroll[m]||{};el('monthlyNet').textContent=fmt(info.t);el('monthlyCo').textContent=fmt(info.co);el('monthlyDays').textContent=info.count;el('monthlyMissing').textContent=info.missing;el('paid').value=pay.paid||'';el('paynote').value=pay.note||'';var p=minutesText(pay.paid);el('payGap').textContent=p===null?'—':fmt(info.t-p)+(info.missing?' (provisoire)':'');var list=el('recList');list.innerHTML='';recoveries.filter(r=>r.date.slice(0,7)===m).forEach(r=>{var row=document.createElement('p');row.textContent=r.date+' · '+r.duration+' · '+r.note+' ';var b=document.createElement('button');b.textContent='Supprimer';b.onclick=function(){if(storageBlocked())return;if(confirm('Supprimer cette récupération du suivi ?')){recoveries=recoveries.filter(x=>x.id!==r.id);persist();drawMonth()}};row.appendChild(b);list.appendChild(row)});if(!list.children.length)list.textContent='Aucune récupération déclarée pour ce mois.'}
+window.savePayroll=function(){if(storageBlocked())return;var m=el('month').value,v=el('paid').value.trim();if(v&&minutesText(v)===null){alert('Utilise le format HH:MM, par exemple 151:40.');return}payroll[m]={paid:v,note:el('paynote').value};clearDraftFields(['paid','paynote']);var ok=persist();drawMonth();alert(ok?'Comparaison enregistrée sur cet appareil.':'Échec du stockage : exporte une sauvegarde JSON.')};
+window.addRecovery=function(){if(storageBlocked())return;var date=el('recDate').value,duration=el('recTime').value.trim(),note=el('recNote').value;if(!date||minutesText(duration)===null){alert('Indique une date et une durée HH:MM.');return}recoveries.push({id:Date.now()+'-'+recoveries.length,date,duration,note});clearDraftFields(['recDate','recTime','recNote']);var ok=persist();if(!ok)alert('Récupération en mémoire seulement : exporte une sauvegarde JSON.');el('month').value=date.slice(0,7);drawMonth();el('recTime').value='';el('recNote').value=''};
 function isDayKey(k){return /^\d{4}-\d{2}-\d{2}$/.test(k)&&!isNaN(asDate(k).getTime())&&localDate(asDate(k))===k}
 function cleanDay(d){if(!d||typeof d!=='object'||Array.isArray(d))throw Error('Journée invalide');var result={};['start','end','mealStart','mealEnd'].forEach(function(k){var v=d[k]||'';if(typeof v!=='string'||(v&&!/^([01]\d|2[0-3]):[0-5]\d$/.test(v)))throw Error('Horaire incorrect : '+k);result[k]=v});result.note=typeof d.note==='string'?d.note:'';result.audit=Array.isArray(d.audit)?d.audit.filter(x=>typeof x==='string'):[];return result}
 function signature(d){return JSON.stringify(['start','end','mealStart','mealEnd','note'].map(k=>d[k]||''))}
-window.importBackup=function(input){if(storageBlocked())return;var f=input.files[0];if(!f)return;var reader=new FileReader();reader.onload=function(){try{var x=JSON.parse(reader.result);if(!x.days||typeof x.days!=='object'||Array.isArray(x.days))throw Error('Structure days absente');var keys=Object.keys(x.days),incoming={};keys.forEach(function(k){if(!isDayKey(k))throw Error('Date incorrecte : '+k);incoming[k]=cleanDay(x.days[k])});var additions=[],same=[],conflicts=[];keys.forEach(function(k){if(!db[k])additions.push(k);else if(signature(cleanDay(db[k]))===signature(incoming[k]))same.push(k);else conflicts.push(k)});
+window.importBackup=function(input){if(storageBlocked()||!leaveForm())return;var f=input.files[0];if(!f)return;var importEpoch=cloudEpoch;var reader=new FileReader();reader.onload=function(){if(importEpoch!==cloudEpoch||storageBlocked())return;try{var x=JSON.parse(reader.result);if(!x.days||typeof x.days!=='object'||Array.isArray(x.days))throw Error('Structure days absente');var keys=Object.keys(x.days),incoming={};keys.forEach(function(k){if(!isDayKey(k))throw Error('Date incorrecte : '+k);incoming[k]=cleanDay(x.days[k])});var additions=[],same=[],conflicts=[];keys.forEach(function(k){if(!db[k])additions.push(k);else if(signature(cleanDay(db[k]))===signature(incoming[k]))same.push(k);else conflicts.push(k)});
 var message='Fichier : '+f.name+'\n'+additions.length+' nouvelle(s) journée(s), '+same.length+' identique(s), '+conflicts.length+' conflit(s).';if(!confirm(message+'\n\nFusionner sans supprimer les données actuelles ?'))return;
 // Une sauvegarde préalable reste possible même en cas de refus ultérieur.
 if(confirm('Exporter une copie de sécurité des données actuelles avant la fusion ? (recommandé)'))backup();
 var choices={};for(var i=0;i<conflicts.length;i++){var k=conflicts[i],old=db[k],next=incoming[k];var fields=['start','mealStart','mealEnd','end','note'];var detail=fields.filter(z=>(old[z]||'')!==(next[z]||'')).map(z=>z+': '+(old[z]||'vide')+' → '+(next[z]||'vide')).join('\n');choices[k]=confirm('CONFLIT '+k+'\n'+detail+'\n\nOK : utiliser les valeurs importées (avec trace).\nAnnuler : conserver les valeurs actuelles.');}
 same.forEach(function(k){db[k].audit=Array.from(new Set([...(db[k].audit||[]),...incoming[k].audit]))});
 additions.forEach(k=>db[k]=incoming[k]);var replaced=0;conflicts.forEach(function(k){if(choices[k]){var old=db[k],next=incoming[k];next.audit=[...(old.audit||[]),...(next.audit||[]).filter(v=>!(old.audit||[]).includes(v)),new Date().toLocaleString('fr-FR')+' : fusion JSON : anciennes valeurs '+signature(old)+' → '+signature(next)];db[k]=next;replaced++}});
-var addedPayroll=0;if(x.payroll&&typeof x.payroll==='object'&&!Array.isArray(x.payroll)){Object.keys(x.payroll).forEach(function(k){if(/^\d{4}-\d{2}$/.test(k)&&!payroll[k]&&x.payroll[k]&&typeof x.payroll[k]==='object'){payroll[k]=x.payroll[k];addedPayroll++}})}
+var addedPayroll=0;if(x.payroll&&typeof x.payroll==='object'&&!Array.isArray(x.payroll)){Object.keys(x.payroll).forEach(function(k){if(/^\d{4}-(0[1-9]|1[0-2])$/.test(k)&&x.payroll[k]&&typeof x.payroll[k]==='object'&&!Array.isArray(x.payroll[k])){var p=x.payroll[k];if(typeof p.paid!=='string'||(p.paid&&minutesText(p.paid)===null)||typeof p.note!=='string')return;if(!payroll[k]){payroll[k]=p;addedPayroll++}else if(JSON.stringify(payroll[k])!==JSON.stringify(p)){var previous=JSON.stringify(payroll[k]),incomingPay=JSON.stringify(p),replacePay=confirm('Comparaison de paie différente pour '+k+'\nActuelle : '+previous+'\nImportée : '+incomingPay+'\nOK : remplacer ; Annuler : conserver.');importLog.push({date:new Date().toISOString(),message:'Conflit paie '+k+' : actuelle '+previous+' ; importée '+incomingPay+' ; '+(replacePay?'importée retenue':'actuelle conservée')});if(replacePay)payroll[k]=p}}})}
 var addedRecoveries=0;if(Array.isArray(x.recoveries)){x.recoveries.forEach(function(r){if(r&&typeof r==='object'&&typeof r.date==='string'&&isDayKey(r.date)&&typeof r.duration==='string'&&minutesText(r.duration)!==null){var match=recoveries.some(z=>z.date===r.date&&z.duration===r.duration&&(z.note||'')===(r.note||''));if(!match){recoveries.push({id:'import-'+Date.now()+'-'+addedRecoveries,date:r.date,duration:r.duration,note:typeof r.note==='string'?r.note:''});addedRecoveries++}}})}
 var report=additions.length+' journée(s) ajoutée(s), '+replaced+' conflit(s) remplacé(s), '+(conflicts.length-replaced)+' conservé(s), '+addedPayroll+' bulletin(s), '+addedRecoveries+' récupération(s) ajoutés.';
 if(Array.isArray(x.importHistory)){x.importHistory.forEach(function(entry){if(entry&&typeof entry.date==='string'&&typeof entry.message==='string'&&!importLog.some(v=>v.date===entry.date&&v.message===entry.message))importLog.push({date:entry.date,message:entry.message})})}
-importLog.push({date:new Date().toISOString(),message:f.name+' : '+report});try{localStorage.setItem(IMPORT_LOG_KEY,JSON.stringify(importLog))}catch(e){};persist();render();drawImportLog();el('importReport').textContent=report;alert('Fusion terminée. '+report);
+importLog.push({date:new Date().toISOString(),message:f.name+' : '+report});var ok=persist();render();drawImportLog();el('importReport').textContent=report;alert((ok?'Fusion enregistrée sur cet appareil. ':'Fusion en mémoire seulement : exporte immédiatement une sauvegarde JSON. ')+report);
 }catch(e){el('importReport').textContent='Import refusé : '+e.message;alert('Import impossible : '+e.message)}};reader.onerror=function(){alert('Impossible de lire ce fichier')};reader.readAsText(f);input.value=''};
 window.exportCSV=function(){var m=el('month').value,rows=[['Date','Début','Début pause','Fin pause','Fin','Présence hors pauses (min)','Déduction théorique (min)','Estimation (min)','Pause incomplète','Note']];monthInfo(m).keys.forEach(k=>{var d=db[k],n=calc(d);rows.push([k,d.start||'',d.mealStart||'',d.mealEnd||'',d.end||'',n===null?'':n,n===null?'':60,n===null?'':Math.max(0,n-60),(!d.mealStart||!d.mealEnd)?'oui':'non',d.note||''])});var csv='\ufeff'+rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(';')).join('\r\n');var a=document.createElement('a'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.href=url;a.download='heures_'+m+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),3000)};
+// Une copie locale distincte par compte ; les clés historiques restent inchangées.
+var dirtyFields={};
+function clearDraftFields(ids){ids.forEach(k=>delete dirtyFields[k]);formDirty=Object.keys(dirtyFields).length>0}
+function restoreDraftFields(){Object.keys(dirtyFields).forEach(k=>el(k).value=dirtyFields[k]);formDirty=Object.keys(dirtyFields).length>0}
+var ACCOUNT_PREFIX='mes_heures_google_v1:',GUEST_ARCHIVE='mes_heures_avant_connexion_v1';
+function clone(x){return JSON.parse(JSON.stringify(x))}
+function statePayload(){return {days:clone(db),payroll:clone(payroll),recoveries:clone(recoveries),importHistory:clone(importLog)}}
+function emptyPayload(){return {days:{},payroll:{},recoveries:[],importHistory:[]}}
+function validatePayload(p){
+ if(!p||typeof p!=='object'||!p.days||Array.isArray(p.days)||typeof p.days!=='object'||!p.payroll||typeof p.payroll!=='object'||Array.isArray(p.payroll)||!Array.isArray(p.recoveries)||!Array.isArray(p.importHistory))throw Error('Sauvegarde incomplète ou invalide');
+ p=clone(p);Object.keys(p.days).forEach(function(k){if(!isDayKey(k))throw Error('Date invalide');var d=p.days[k],cleaned=cleanDay(d);if((d.audit!==undefined&&(!Array.isArray(d.audit)||d.audit.some(v=>typeof v!=='string')))||(d.note!==undefined&&typeof d.note!=='string'))throw Error('Historique de journée invalide');p.days[k]=Object.assign({},d,cleaned)});
+ Object.keys(p.payroll).forEach(function(k){var v=p.payroll[k];if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(k)||!v||typeof v.paid!=='string'||(v.paid&&minutesText(v.paid)===null)||typeof v.note!=='string')throw Error('Comparaison mensuelle invalide')});
+ p.recoveries.forEach(function(r){if(!r||typeof r.id!=='string'||!isDayKey(r.date)||typeof r.duration!=='string'||minutesText(r.duration)===null||typeof r.note!=='string')throw Error('Récupération invalide')});
+ p.importHistory.forEach(function(h){if(!h||typeof h.date!=='string'||typeof h.message!=='string')throw Error('Historique d’import invalide')});return clone(p)
+}
+function applyPayload(p){db=clone(p.days);payroll=clone(p.payroll);recoveries=clone(p.recoveries);importLog=clone(p.importHistory);render();drawImportLog()}
+function setSync(message){el('syncStatus').textContent=message}
+function cacheKey(){return ACCOUNT_PREFIX+currentUser.uid}
+function writeAccountCache(){localStorage.setItem(cacheKey(),JSON.stringify({schema:1,uid:currentUser.uid,revision:cloudRevision,pending:pendingCloud,payload:statePayload()}))}
+function accountButtons(){
+ el('loginButton').hidden=!!currentUser;el('logoutButton').hidden=!currentUser;
+ el('retrySync').hidden=!currentUser||(!pendingCloud&&cloudReady)||cloudBusy||cloudConflict;
+ el('refreshCloud').hidden=!currentUser||!latestCloud||(!cloudConflict&&!formDirty);
+ el('migrateLocal').hidden=!currentUser||!cloudReady||cloudBusy||cloudConflict;
+ el('accountLabel').textContent=currentUser?'Compte Google : '+(currentUser.email||currentUser.displayName||'connecté'):'Mode local · sans connexion';
+}
+function leaveForm(){if(!formDirty)return true;if(!confirm('Des champs modifiés ne sont pas enregistrés. Les abandonner ?'))return false;dirtyFields={};formDirty=false;return true}
+function installFormTracking(){
+ ['start','mealStart','mealEnd','end','note','paid','paynote','recDate','recTime','recNote'].forEach(function(id){el(id).addEventListener('input',function(){dirtyFields[id]=el(id).value;formDirty=true})});
+ window.addEventListener('beforeunload',function(e){if(formDirty){e.preventDefault();e.returnValue=''}});
+ window.addEventListener('online',function(){if(currentUser&&pendingCloud&&!cloudConflict)scheduleSync()});
+ window.addEventListener('storage',function(e){if(currentUser&&e.key===cacheKey()){
+ // Deux onglets ne doivent jamais remplacer leurs copies locales à tour de rôle.
+ cloudConflict=true;cloudReady=false;setSync('Ce compte a été modifié dans un autre onglet. Exporte ta version si nécessaire, puis recharge cette page avant de continuer.');accountButtons()
+ }});
+}
+function archiveDraft(){if(!formDirty)return;var fields={};['start','mealStart','mealEnd','end','note','paid','paynote','recDate','recTime','recNote'].forEach(k=>fields[k]=el(k).value);localStorage.setItem('mes_heures_brouillon_v1:'+ (currentUser?currentUser.uid:'local'),JSON.stringify({selected:selected,month:el('month').value,fields:fields,date:new Date().toISOString()}));dirtyFields={};formDirty=false}
+function readLegacy(){
+ var days=JSON.parse(localStorage.getItem(KEY)||'{}'),meta=JSON.parse(localStorage.getItem(SETTINGS)||'{}'),history=JSON.parse(localStorage.getItem(IMPORT_LOG_KEY)||'[]');
+ return validatePayload({days:days,payroll:meta.payroll||{},recoveries:meta.recoveries||[],importHistory:history})
+}
+function decodeRemote(snapshot){if(!snapshot.exists())return {revision:0,payload:emptyPayload()};var x=snapshot.data();if(x.schema!==1||!Number.isSafeInteger(x.revision)||x.revision<1||typeof x.payload!=='string')throw Error('Format de synchronisation inconnu');return {revision:x.revision,payload:validatePayload(JSON.parse(x.payload))}}
+function cloudRef(uid){return sdk.doc(firestore,'users',uid,'state','main')}
+function scheduleSync(){clearTimeout(cloudTimer);cloudTimer=setTimeout(pushCloud,400)}
+function readableError(e){var c=e&&e.code||'';if(c.includes('permission-denied'))return 'Accès refusé : vérifie les règles Firestore et le compte connecté.';if(c.includes('unauthorized-domain'))return 'Cette adresse doit être ajoutée aux domaines autorisés de Firebase.';if(c.includes('popup-blocked'))return 'La fenêtre Google a été bloquée. Autorise les fenêtres surgissantes, puis réessaie.';if(c.includes('popup-closed-by-user')||c.includes('cancelled-popup-request'))return 'Connexion Google annulée.';if(c.includes('operation-not-allowed'))return 'La connexion Google doit être activée dans Firebase.';return (e&&e.message)||'Connexion indisponible. Réessaie avec Internet.'}
+async function initCloud(){
+ try{
+ var modules=await Promise.all([
+ import('https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js'),
+ import('https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js'),
+ import('https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js')]);
+ sdk=Object.assign({},modules[0],modules[1],modules[2]);
+ var app=sdk.initializeApp({apiKey:'AIzaSyDYMYkbTG2jkOTU5nmOZ1oaCDaLdK_UkwA',authDomain:'mes-heures-app.firebaseapp.com',projectId:'mes-heures-app',storageBucket:'mes-heures-app.firebasestorage.app',messagingSenderId:'1065654589314',appId:'1:1065654589314:web:d64492878e0e26cbb3219b'});
+ auth=sdk.getAuth(app);firestore=sdk.getFirestore(app);auth.languageCode='fr';
+ await sdk.setPersistence(auth,sdk.browserLocalPersistence);
+ sdk.onAuthStateChanged(auth,handleAccount,function(e){setSync(readableError(e))});
+ el('loginButton').disabled=false;
+ }catch(e){setSync('Connexion Google indisponible. Le mode local fonctionne toujours. Recharge la page pour réessayer. '+readableError(e))}
+}
+window.googleLogin=function(){if(!sdk||!auth||cloudBusy||!leaveForm())return;var provider=new sdk.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});sdk.signInWithPopup(auth,provider).catch(function(e){setSync(readableError(e)+' Utilise Safari, Chrome ou Firefox si le navigateur intégré refuse la connexion.')})};
+window.googleLogout=async function(){if(cloudBusy)return;if(!leaveForm())return;if(pendingCloud&&!confirm('Certaines modifications ne sont pas synchronisées. Elles resteront sur cet appareil pour ce compte. Exporter une sauvegarde JSON avant de te déconnecter est recommandé. Continuer ?'))return;try{await sdk.signOut(auth)}catch(e){setSync(readableError(e))}};
+async function handleAccount(user){
+ if(authReady&&((currentUser&&currentUser.uid)||null)===((user&&user.uid)||null))return;
+ try{archiveDraft();if(!currentUser&&storageReadable){localStorage.setItem(GUEST_ARCHIVE,JSON.stringify(statePayload()))}}catch(e){setSync('Impossible de conserver le brouillon local : exporte une sauvegarde avant de changer de compte.');return}
+ authReady=true;cloudEpoch++;clearTimeout(cloudTimer);if(cloudUnsubscribe)cloudUnsubscribe();cloudUnsubscribe=null;
+ currentUser=user;cloudReady=false;cloudBusy=false;cloudConflict=false;pendingCloud=false;cloudRevision=0;latestCloud=null;storageReadable=true;applyPayload(emptyPayload());
+ if(!user){try{applyPayload(readLegacy())}catch(e){storageReadable=false;storageBlocked()}setSync('Mode local : les données de ce navigateur ne sont pas synchronisées.');accountButtons();return}
+ try{
+ var cached=localStorage.getItem(cacheKey());if(cached){var c=JSON.parse(cached);if(c.schema!==1||c.uid!==user.uid||!Number.isSafeInteger(c.revision)||c.revision<0||typeof c.pending!=='boolean')throw Error('Copie locale invalide');applyPayload(validatePayload(c.payload));cloudRevision=c.revision;pendingCloud=c.pending}
+ }catch(e){storageReadable=false;setSync('Copie locale illisible : aucune donnée ne sera écrasée. Conserve cet appareil et récupère une sauvegarde.');storageBlocked();accountButtons();return}
+ setSync('Connexion à ton historique privé…');accountButtons();
+ var epoch=cloudEpoch;
+ cloudUnsubscribe=sdk.onSnapshot(cloudRef(user.uid),{includeMetadataChanges:true},function(snap){
+ if(epoch!==cloudEpoch||snap.metadata.hasPendingWrites)return;
+ if(snap.metadata.fromCache){setSync('Connexion en attente. La dernière copie locale reste disponible à l’export.');return}
+ try{latestCloud=decodeRemote(snap);cloudReady=true;consumeCloud()}catch(e){cloudReady=false;setSync('Historique en ligne illisible : aucune donnée ne sera remplacée. '+readableError(e));accountButtons()}
+ },function(e){if(epoch!==cloudEpoch)return;cloudReady=false;setSync(readableError(e)+' Tes données locales sont conservées.');accountButtons()});
+}
+function consumeCloud(){
+ if(!latestCloud||cloudBusy||!currentUser)return;
+ if(pendingCloud){
+ if(latestCloud.revision!==cloudRevision){cloudConflict=true;setSync('Deux versions existent : un autre appareil a modifié l’historique. Ta version locale est conservée. Exporte-la, puis utilise « Charger la version en ligne » et importe ton JSON pour fusionner les journées.');accountButtons();return}
+ cloudConflict=false;setSync('Modifications locales en attente de synchronisation.');accountButtons();scheduleSync();return
+ }
+ if(formDirty){setSync('Une version en ligne est disponible. Termine tes saisies ou utilise « Charger la version en ligne ».');accountButtons();return}
+ var previous=statePayload(),previousRevision=cloudRevision;
+ try{applyPayload(latestCloud.payload);cloudRevision=latestCloud.revision;writeAccountCache();setSync('Synchronisé · historique privé à jour.')}catch(e){applyPayload(previous);cloudRevision=previousRevision;cloudReady=false;setSync('Impossible de conserver la copie locale : exporte une sauvegarde JSON. '+readableError(e))}
+ accountButtons()
+}
+async function pushCloud(){
+ if(!currentUser||!cloudReady||!storageReadable||cloudConflict||cloudBusy||!pendingCloud)return;
+ var epoch=cloudEpoch,uid=currentUser.uid,expected=cloudRevision,payload;
+ try{payload=JSON.stringify(validatePayload(statePayload()));if(new TextEncoder().encode(payload).length>850000)throw Error('La copie dépasse la capacité de cette version. Exporte une sauvegarde complète ; les données restent sur cet appareil.')}catch(e){setSync(readableError(e));return}
+ cloudBusy=true;setSync('Synchronisation en cours…');accountButtons();
+ try{
+ var revision=await sdk.runTransaction(firestore,async function(transaction){
+ var ref=cloudRef(uid),snap=await transaction.get(ref),remote=decodeRemote(snap);
+ if(epoch!==cloudEpoch)throw Error('Le compte a changé.');
+ if(remote.revision!==expected){var e=Error('Conflit entre appareils');e.syncConflict=true;throw e}
+ transaction.set(ref,{schema:1,revision:expected+1,payload:payload,updatedAt:sdk.serverTimestamp()});return expected+1
+ });
+ if(epoch!==cloudEpoch)return;
+ cloudRevision=revision;pendingCloud=false;
+ try{writeAccountCache();setSync('Synchronisé · historique privé enregistré en ligne.')}catch(e){pendingCloud=true;cloudConflict=true;setSync('Enregistré en ligne, mais copie locale indisponible : exporte un JSON puis recharge la page.')}
+ }catch(e){if(epoch!==cloudEpoch)return;if(e.syncConflict){cloudConflict=true;try{latestCloud=decodeRemote(await sdk.getDocFromServer(cloudRef(uid)))}catch(readError){latestCloud=null}setSync('Un autre appareil a enregistré une nouvelle version. Ta copie locale est conservée. Exporte-la, charge la version en ligne, puis importe le JSON pour fusionner.')}else setSync('Non synchronisé · copie locale conservée. '+readableError(e))}
+ finally{if(epoch===cloudEpoch){cloudBusy=false;accountButtons();if(!pendingCloud&&latestCloud&&latestCloud.revision>cloudRevision)consumeCloud()}}
+}
+window.retryCloud=function(){if(!currentUser)return;if(!cloudReady){var u=currentUser;authReady=false;handleAccount(u)}else pushCloud()};
+window.acceptCloud=async function(){
+ if(!currentUser||!latestCloud||cloudBusy||!storageReadable)return;
+ var loadEpoch=cloudEpoch;try{latestCloud=decodeRemote(await sdk.getDocFromServer(cloudRef(currentUser.uid)));if(loadEpoch!==cloudEpoch)return}catch(e){setSync('Lecture en ligne impossible : '+readableError(e));return}
+ if(!confirm(pendingCloud?'Charger la version en ligne ? Ta version locale sera conservée dans une sauvegarde JSON et sur cet appareil. Importe ensuite le JSON pour fusionner tes modifications.':'Charger la version en ligne ? Les champs non enregistrés seront abandonnés.'))return;
+ try{
+ archiveDraft();var before=statePayload();
+ // Conserver une copie récupérable avant tout remplacement volontaire.
+ localStorage.setItem('mes_heures_avant_fusion_v1:'+currentUser.uid,JSON.stringify({payload:before,date:new Date().toISOString()}));
+ if(pendingCloud)downloadJSON(exportPayload(db),'Mes_heures_avant_fusion_'+localDate()+'.json');
+ var oldRevision=cloudRevision,wasPending=pendingCloud;
+ try{applyPayload(latestCloud.payload);cloudRevision=latestCloud.revision;pendingCloud=false;writeAccountCache()}catch(e){applyPayload(before);cloudRevision=oldRevision;pendingCloud=wasPending;throw e}
+ cloudConflict=false;cloudReady=true;setSync('Version en ligne chargée. Si tu avais des modifications locales, importe la sauvegarde JSON pour les fusionner.');accountButtons()
+ }catch(e){setSync('Chargement interrompu : '+readableError(e))}
+};
+window.importLocalData=function(){
+ if(!currentUser||storageBlocked()||!leaveForm())return;
+ try{var p=readLegacy();if(!Object.keys(p.days).length&&!Object.keys(p.payroll).length&&!p.recoveries.length&&!p.importHistory.length){alert('Aucune donnée dans l’ancien stockage local de ce navigateur. Tu peux importer une sauvegarde JSON depuis la section Sauvegardes.');return}
+ if(!confirm('Ajouter les anciennes données locales au compte '+(currentUser.email||'connecté')+' ? Les conflits seront examinés. Le stockage local d’origine sera conservé.'))return;
+ var file=new File([JSON.stringify({days:p.days,payroll:p.payroll,recoveries:p.recoveries,importHistory:p.importHistory})],'Donnees_locales.json',{type:'application/json'});importBackup({files:[file],value:''})
+ }catch(e){alert('Lecture locale impossible : '+readableError(e))}
+};
+// Récupérer les copies conservées sans modifier l’historique courant.
+window.exportRescue=function(){try{var suffix=currentUser?currentUser.uid:'local',data={date:new Date().toISOString(),rawAccount:currentUser?localStorage.getItem(cacheKey()):null,rawLocal:{days:localStorage.getItem(KEY),settings:localStorage.getItem(SETTINGS),history:localStorage.getItem(IMPORT_LOG_KEY)},draft:JSON.parse(localStorage.getItem('mes_heures_brouillon_v1:'+suffix)||'null'),beforeMerge:currentUser?JSON.parse(localStorage.getItem('mes_heures_avant_fusion_v1:'+suffix)||'null'):null};downloadJSON(data,'Mes_heures_copies_de_securite_'+localDate()+'.json')}catch(e){alert(readableError(e))}};
+
+window.drawMonth=function(){if(leaveForm()){drawMonth();formDirty=false}};
 el('month').value=selected.slice(0,7);el('recDate').value=selected;render();drawImportLog();storageBlocked();setInterval(tick,15000);
+installFormTracking();initCloud();
 })();
 </script></body></html>
